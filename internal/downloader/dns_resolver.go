@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"time"
 
@@ -78,7 +79,7 @@ func (r *DNSResolver) Resolve(ctx context.Context, host string) ([]net.IP, error
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := net.Dialer{Timeout: 10 * time.Second}
-			server := r.servers[0] // Простая реализация - можно добавить балансировку
+			server := r.servers[rand.Intn(len(r.servers))] // Простая реализация - можно добавить балансировку
 			return d.DialContext(ctx, "udp", server+":53")
 		},
 	}
