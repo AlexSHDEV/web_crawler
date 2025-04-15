@@ -24,3 +24,4 @@ go.work.sum
 # added by option
 .gitignore
 *.json
+*.txt
