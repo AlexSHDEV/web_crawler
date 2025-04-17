@@ -26,22 +26,29 @@ func FetchStaticHTML(url string) (*html.Node, error) {
 	return html.Parse(resp.Body)
 }
 
-func FetchDynamicHTML(ctx context.Context, ur string, resolver *DNSResolver) (*html.Node, error) {
+func GetHost(u string) (string, error) {
+	URL, err := url.Parse(u)
+	if err != nil {
+		return "", fmt.Errorf("Error parsing URL: %d", err)
+	}
+	return URL.Hostname(), nil
+}
+
+func FetchDynamicHTML(ctx context.Context, ur string, resolver *DNSResolver) (string, error) {
 
 	var htmlPage string
 
-	u, err := url.Parse(ur)
+	host, err := GetHost(ur)
 	if err != nil {
-		return nil, fmt.Errorf("Error parsing URL: %d", err)
+		fmt.Printf("Getting host from url falied: %v\n", err)
+		return "", err
 	}
-	// 1. Извлекаем хост из URL
-	host := u.Hostname()
 
 	// 2. Разрешаем DNS
 	ips, err := resolver.ResolveWithPreference(ctx, host, false)
 	if err != nil {
 		fmt.Printf("DNS resolution failed: %v\n", err)
-		return nil, err
+		return "", err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -65,13 +72,19 @@ func FetchDynamicHTML(ctx context.Context, ur string, resolver *DNSResolver) (*h
 		chromedp.OuterHTML("html", &htmlPage),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("Error running chronedp: %d", err)
+		return "", fmt.Errorf("Error running chronedp: %d", err)
 	}
 
-	return html.Parse(strings.NewReader(htmlPage))
+	return htmlPage, nil
 }
 
-func ExtractLinks(n *html.Node, baseURL string) []string {
+func ExtractLinks(htmlPage string, baseURL string) []string {
+	n, err := html.Parse(strings.NewReader(htmlPage))
+	if err != nil {
+		fmt.Printf("Error parsing html document: %v\n", err)
+		return nil
+	}
+
 	var links []string
 	var f func(*html.Node)
 	f = func(n *html.Node) {
