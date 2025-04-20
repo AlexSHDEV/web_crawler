@@ -68,11 +68,11 @@ func (r *DNSResolver) Resolve(ctx context.Context, host string) ([]net.IP, error
 	if cached, err := r.cache.Get(ctx, host); err != nil {
 		return nil, fmt.Errorf("cache error: %v", err)
 	} else if cached != nil {
-		fmt.Printf("[CACHE HIT] %s\n", host)
+		//fmt.Printf("[CACHE HIT] %s\n", host)
 		return cached, nil
 	}
 
-	fmt.Printf("[CACHE MISS] %s\n", host)
+	//fmt.Printf("[CACHE MISS] %s\n", host)
 
 	// Выполняем DNS-запрос
 	resolver := &net.Resolver{

@@ -34,24 +34,25 @@ func GetHost(u string) (string, error) {
 	return URL.Hostname(), nil
 }
 
-func FetchDynamicHTML(ctx context.Context, ur string, resolver *DNSResolver) (string, error) {
+func FetchDynamicHTML(ctx context.Context, ur string, resolver *DNSResolver) (string, int, error) {
 
 	var htmlPage string
+	var statusCode int
 
 	host, err := GetHost(ur)
 	if err != nil {
 		fmt.Printf("Getting host from url falied: %v\n", err)
-		return "", err
+		return "", 0, err
 	}
 
 	// 2. Разрешаем DNS
 	ips, err := resolver.ResolveWithPreference(ctx, host, false)
 	if err != nil {
 		fmt.Printf("DNS resolution failed: %v\n", err)
-		return "", err
+		return "", 0, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	// Настраиваем ChromeDP с кастомным DNS
@@ -67,15 +68,20 @@ func FetchDynamicHTML(ctx context.Context, ur string, resolver *DNSResolver) (st
 
 	err = chromedp.Run(taskCtx,
 		chromedp.Navigate(ur),
-		chromedp.WaitReady("body"),
-		chromedp.Sleep(2*time.Second),
+		chromedp.Sleep(3*time.Second),
 		chromedp.OuterHTML("html", &htmlPage),
+		chromedp.Evaluate(`
+			window.performance.getEntries()
+				.filter(entry => entry.entryType === 'navigation')
+				.map(entry => entry.responseStatus)[0]
+		`, &statusCode),
 	)
 	if err != nil {
-		return "", fmt.Errorf("Error running chronedp: %d", err)
+		return "", 0, fmt.Errorf("Error running chromedp: %d", err)
 	}
 
-	return htmlPage, nil
+	//_ = chromedp.Cancel(taskCtx)
+	return htmlPage, statusCode, nil
 }
 
 func ExtractLinks(htmlPage string, baseURL string) []string {
@@ -93,7 +99,15 @@ func ExtractLinks(htmlPage string, baseURL string) []string {
 				if a.Key == "href" {
 					link := a.Val
 					if !strings.HasPrefix(link, "http") {
-						link = baseURL + link
+						if len(link) > 2 {
+							if link[:2] == "//" {
+								link = "http:" + link
+							} else {
+								link = baseURL + link
+							}
+						} else {
+							link = baseURL + link
+						}
 					}
 					links = append(links, link)
 				}

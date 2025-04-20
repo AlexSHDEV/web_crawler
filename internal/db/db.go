@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -17,6 +18,7 @@ type CrawledContent struct {
 	//HTML        string
 	TextContent string
 	Title       string
+	Status      int
 	Metadata    map[string]string
 	ContentHash string
 	CrawledAt   time.Time
@@ -71,6 +73,7 @@ func (s *PostgresStorage) Init() error {
 		url TEXT NOT NULL,
 		text_content TEXT,
 		title TEXT,
+		status INT,
 		metadata JSONB,
 		content_hash TEXT NOT NULL UNIQUE,
 		crawled_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -92,8 +95,8 @@ func (s *PostgresStorage) Save(ctx context.Context, content *CrawledContent) err
 	}
 
 	query := `INSERT INTO crawled_content (
-		domain, url, text_content, title, metadata, content_hash, crawled_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		domain, url, text_content, title, status, metadata, content_hash, crawled_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	ON CONFLICT (content_hash) DO NOTHING`
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -102,6 +105,7 @@ func (s *PostgresStorage) Save(ctx context.Context, content *CrawledContent) err
 		//content.HTML,
 		content.TextContent,
 		content.Title,
+		content.Status,
 		metadataJSON,
 		content.ContentHash,
 		content.CrawledAt,
@@ -110,11 +114,48 @@ func (s *PostgresStorage) Save(ctx context.Context, content *CrawledContent) err
 	return err
 }
 
+func (s *PostgresStorage) ExistsByURL(ctx context.Context, url string) (bool, error) {
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM crawled_content WHERE url = $1)`
+	err := s.db.QueryRowContext(ctx, query, url).Scan(&exists)
+	return exists, err
+}
+
 func (s *PostgresStorage) Exists(ctx context.Context, contentHash string) (bool, error) {
 	var exists bool
 	query := `SELECT EXISTS(SELECT 1 FROM crawled_content WHERE content_hash = $1)`
 	err := s.db.QueryRowContext(ctx, query, contentHash).Scan(&exists)
 	return exists, err
+}
+
+type StatContent struct {
+	Domain string `postgres:"domain"`
+	Url    string
+	Status int
+}
+
+func (s *PostgresStorage) GetAll(table *[]StatContent) error {
+	rows, err := s.db.Query("SELECT domain, url, status FROM crawled_content")
+	if err != nil {
+		log.Fatal(err)
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		line := &StatContent{}
+		if err := rows.Scan(&line.Domain, &line.Url, &line.Status); err != nil {
+			log.Fatal(err)
+			return err
+		}
+		*table = append(*table, *line)
+	}
+
+	if err = rows.Err(); err != nil {
+		log.Fatal(err)
+		return err
+	}
+	return nil
 }
 
 func (s *PostgresStorage) Close() error {
