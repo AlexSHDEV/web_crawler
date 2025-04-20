@@ -17,20 +17,13 @@ import (
 	"time"
 )
 
-//разобраться почему не краулится спбгу --- забыл поменять mainhost
-//разобраться почему просходит deadlock --- горутины читают из пустого канала => нужно сделать отдельный воркер, обрабатывающий формирующий пул ссылок и заносящий ссылки в канал. Если ссылок нет то он отправит сообщение об остановке. Каждая горутина должна быть с селектором и обрабатывать сигнал завершения
-//сделать правильной потоковую обработку (создать пул ссылок, перед переносом новой ссылки в канал) X
-//добавить эффективный конструктор пула (через sync.map) X
-//Добавить сохранение ответа сервера в базу данных для детекции неработающих ресурсов X
-//добавить сводку статистики
-
-var queuePath string = "./queue.json"
+var settingsPath string = "./settings.json"
 
 type settings struct {
 	Mode        string            `json:"mode"`
 	MainHost    string            `json:"main_domain"`
 	DnsServers  []string          `json:"dns_servers"`
-	ToDownload  []string          `json:"toDownload"`
+	ToDownload  string            `json:"toDownload"`
 	DBConfig    db.DatabaseConfig `json:"dbconfig"`
 	RedisConfig struct {
 		Host       string `json:"host"`
@@ -165,130 +158,129 @@ func (w *Worker) Start(ctx context.Context, in chan string) {
 	}
 }
 
+type Crawler struct {
+	resolver *downloader.DNSResolver
+	storage  *db.PostgresStorage
+}
+
+func BuildCrawler(settings *settings) (*Crawler, error) {
+	cache := downloader.NewDNSCache(settings.RedisConfig.Host, time.Duration(settings.RedisConfig.Expiration)*time.Hour)
+	storage, err := db.NewPostgresStorage(settings.DBConfig)
+	if err != nil {
+		fmt.Println("Error create connection to database: ", err)
+		//log.Fatalf("Failed to initialize storage: %v", err)
+		return nil, err
+	}
+
+	if err := storage.Init(); err != nil {
+		log.Fatalf("Failed to init database: %v", err)
+		return nil, err
+	}
+
+	return &Crawler{
+		resolver: downloader.NewDNSResolver(settings.DnsServers, *cache),
+		storage:  storage,
+	}, nil
+}
+
+func (c *Crawler) Run(maindomain string, starturl string, numWorkers int) {
+	defer c.storage.Close()
+	var m sync.RWMutex
+	var wg sync.WaitGroup
+	ctx := context.Background()
+	pool := downloader.CreatePool(&m)
+
+	urlChan := make(chan string, 100000)
+
+	defer close(urlChan)
+
+	urlChan <- starturl
+
+	for i := 1; i <= numWorkers; i++ {
+		wg.Add(1)
+		worker := Worker{
+			id:       i,
+			resolver: c.resolver,
+			storage:  c.storage,
+			wg:       &wg,
+			timeout:  10,
+			pool:     *pool,
+			host:     maindomain,
+		}
+		go worker.Start(ctx, urlChan)
+	}
+
+	wg.Wait()
+}
+
+func (c *Crawler) ShowStat(maindomain string) {
+	defer c.storage.Close()
+	var out = make([]db.StatContent, 0, 100)
+	err := c.storage.GetAll(&out)
+	if err != nil {
+		return
+	}
+
+	fmt.Println("Общее количество ссылок: ", len(out))
+
+	UnderDomain := 0
+	for _, row := range out {
+		if strings.Contains(row.Domain, maindomain) {
+			UnderDomain += 1
+		}
+	}
+	fmt.Println("Количество внутренних ссылок главного домена: ", UnderDomain)
+
+	NotWorked := 0
+	for _, row := range out {
+		if row.Status != 200 {
+			NotWorked += 1
+		}
+	}
+	fmt.Println("Количество неработающих страниц: ", NotWorked)
+
+	InterDomain := 0
+	for _, row := range out {
+		if strings.Contains(row.Domain, maindomain) && len(row.Domain) > len(maindomain) {
+			InterDomain += 1
+		}
+	}
+	fmt.Println("Колличество внутренних поддоменов: ", InterDomain)
+
+	OuterDomain := 0
+	UniqOuterDomain := make(map[string]bool, 0)
+	for _, row := range out {
+		if !strings.Contains(row.Domain, maindomain) {
+			OuterDomain += 1
+			UniqOuterDomain[row.Domain] = true
+		}
+	}
+	fmt.Println("Колличество ссылок на внешние ресурсы : ", OuterDomain)
+	fmt.Println("Количество уникальных внешних ссылок: ", len(UniqOuterDomain))
+
+	Files := 0
+	for _, row := range out {
+		if strings.Contains(row.Url, ".doc") || strings.Contains(row.Url, ".docx") || strings.Contains(row.Url, ".pdf") {
+			Files += 1
+		}
+	}
+	fmt.Println("Количество уникальных ссылок на файлы doc/docx/pdf: ", Files)
+}
+
 func main() {
 
 	settings := &settings{}
-	settings.SetSettings(queuePath)
+	settings.SetSettings(settingsPath)
+	C, err := BuildCrawler(settings)
+	if err != nil {
+		log.Fatalf("Failed to Build Crawler: %v", err)
+	}
 
 	switch settings.Mode {
 	case "spider":
-		// ============================<INIT BLOCK>=================================
-		var m sync.RWMutex
-		var wg sync.WaitGroup
-		ctx := context.Background()
-		cache := downloader.NewDNSCache(settings.RedisConfig.Host, time.Duration(settings.RedisConfig.Expiration)*time.Hour)
-		resolver := downloader.NewDNSResolver(settings.DnsServers, *cache)
-		storage, err := db.NewPostgresStorage(settings.DBConfig)
-		if err != nil {
-			fmt.Println("Error create connection to database: ", err)
-			//log.Fatalf("Failed to initialize storage: %v", err)
-			return
-		}
-		defer storage.Close()
-
-		if err := storage.Init(); err != nil {
-			log.Fatalf("Failed to init database: %v", err)
-		}
-
-		urlChan := make(chan string, 100000)
-		//outChan := make(chan string, 1000)
-
-		defer close(urlChan)
-		//defer close(outChan)
-
-		for _, url := range settings.ToDownload {
-			urlChan <- url
-		}
-
-		pool := downloader.CreatePool(&m)
-
-		// =========================================================================
-		numWorkers := 5
-		for i := 1; i <= numWorkers; i++ {
-			wg.Add(1)
-			worker := Worker{
-				id:       i,
-				resolver: resolver,
-				storage:  storage,
-				wg:       &wg,
-				timeout:  6,
-				pool:     *pool,
-				host:     settings.MainHost,
-			}
-			go worker.Start(ctx, urlChan)
-		}
-		// wg.Add(1)
-		// synczer := Synchronizer{
-		// 	pool:    *pool,
-		// 	wg:      &wg,
-		// 	timeout: 10,
-		// }
-		// go synczer.Start(ctx, outChan, urlChan)
-		wg.Wait()
-
+		C.Run(settings.MainHost, settings.ToDownload, 3)
 	case "stat":
-		storage, err := db.NewPostgresStorage(settings.DBConfig)
-		if err != nil {
-			fmt.Println("Error create connection to database: ", err)
-			//log.Fatalf("Failed to initialize storage: %v", err)
-			return
-		}
-		defer storage.Close()
-
-		if err := storage.Init(); err != nil {
-			log.Fatalf("Failed to init database: %v", err)
-		}
-
-		var out = make([]db.StatContent, 0, 100)
-		err = storage.GetAll(&out)
-		if err != nil {
-			return
-		}
-
-		fmt.Println("Общее количество ссылок: ", len(out))
-
-		UnderDomain := 0
-		for _, row := range out {
-			if strings.Contains(row.Domain, settings.MainHost) {
-				UnderDomain += 1
-			}
-		}
-		fmt.Println("Количество внутренних ссылок главного домена: ", UnderDomain)
-
-		NotWorked := 0
-		for _, row := range out {
-			if row.Status != 200 {
-				NotWorked += 1
-			}
-		}
-		fmt.Println("Количество неработающих страниц: ", NotWorked)
-
-		InterDomain := 0
-		for _, row := range out {
-			if strings.Contains(row.Domain, settings.MainHost) && len(row.Domain) > len(settings.MainHost) {
-				InterDomain += 1
-			}
-		}
-		fmt.Println("Колличество внутренних поддоменов: ", InterDomain)
-
-		OuterDomain := 0
-		UniqOuterDomain := make(map[string]bool, 0)
-		for _, row := range out {
-			if !strings.Contains(row.Domain, settings.MainHost) {
-				OuterDomain += 1
-				UniqOuterDomain[row.Domain] = true
-			}
-		}
-		fmt.Println("Колличество ссылок на внешние ресурсы : ", OuterDomain)
-		fmt.Println("Количество уникальных внешних ссылок: ", len(UniqOuterDomain))
-
-		Files := 0
-		for _, row := range out {
-			if strings.Contains(row.Url, ".doc") || strings.Contains(row.Url, ".docx") || strings.Contains(row.Url, ".pdf") {
-				Files += 1
-			}
-		}
-		fmt.Println("Количество уникальных ссылок на файлы doc/docx/pdf: ", Files)
+		C.ShowStat(settings.MainHost)
 	}
 
 }
