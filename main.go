@@ -119,7 +119,7 @@ func (w *Worker) Start(ctx context.Context, in chan string) {
 				log.Println("Content saved successfully ", content.URL, " by worker ", w.id)
 			}
 
-			if host == w.host {
+			if host == w.host || strings.Contains(host, w.host) {
 				links := downloader.ExtractLinks(htmlPage, "http://"+host)
 
 				for _, link := range links {
@@ -256,7 +256,7 @@ func main() {
 
 	switch settings.Mode {
 	case "spider":
-		C.Run(settings.MainHost, settings.ToDownload, 3)
+		C.Run(settings.MainHost, settings.ToDownload, 5)
 	case "stat":
 		C.ShowStat(settings.MainHost)
 	}
