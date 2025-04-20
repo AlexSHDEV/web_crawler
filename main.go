@@ -72,28 +72,6 @@ type Worker struct {
 	host     string
 }
 
-// type Synchronizer struct {
-// 	pool    downloader.URLsPool
-// 	wg      *sync.WaitGroup
-// 	timeout time.Duration
-// }
-
-// func (s *Synchronizer) Start(ctx context.Context, in <-chan string, out chan<- string) {
-// 	defer s.wg.Done()
-// 	for {
-// 		select {
-// 		case url := <-in:
-// 			if !s.pool.Exist(url) {
-// 				s.pool.Add(url)
-// 				out <- url
-// 			}
-// 		case <-time.After(s.timeout * time.Second):
-// 			fmt.Println("STOP SYNCHRONIZER")
-// 			return
-// 		}
-// 	}
-// }
-
 func (w *Worker) Start(ctx context.Context, in chan string) {
 	defer w.wg.Done()
 
